@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Flight Simulator 2020 - Ultimate Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .hud-panel {
+            color: white;
+            text-shadow: 1px 1px 2px black;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 8px;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        #top-bar { display: flex; justify-content: space-between; width: 100%; }
+        #controls-hint { font-size: 13px; opacity: 0.9; line-height: 1.5; }
+        .stat-box { font-size: 28px; font-weight: bold; font-family: 'Courier New', monospace; color: #00ffcc; }
+        .label { font-size: 12px; text-transform: uppercase; opacity: 0.7; letter-spacing: 1px; }
+
+        #loading {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000;
+            display: flex; justify-content: center; align-items: center;
+            flex-direction: column;
+            color: white; font-size: 24px; font-weight: bold;
+            z-index: 999;
+            transition: opacity 1s;
+        }
+        .loader {
+            border: 5px solid #f3f3f3; border-top: 5px solid #3498db;
+            border-radius: 50%; width: 50px; height: 50px;
+            animation: spin 1s linear infinite; margin-bottom: 20px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <div id="loading">
+        <div class="loader"></div>
+        <div id="loading-text">Generating World...</div>
+    </div>
+
+    <div id="ui-layer">
+        <div id="top-bar">
+            <div class="hud-panel">
+                <div class="label">Airspeed</div>
+                <div class="stat-box" id="speed-display">0 kn</div>
+            </div>
+            <div class="hud-panel" style="text-align: center;">
+                <div class="label">Aircraft</div>
+                <div class="stat-box" id="plane-display" style="font-size: 20px; color: white;">CESSNA</div>
+            </div>
+            <div class="hud-panel">
+                <div class="label">Altitude</div>
+                <div class="stat-box" id="alt-display">0 ft</div>
+            </div>
+        </div>
+
+        <div class="hud-panel" style="align-self: flex-start; margin-top: auto;">
+            <div id="controls-hint">
+                <b>FLIGHT CONTROLS</b><br>
+                <span style="color: #aaa;">W / S</span> : Pitch Down / Up<br>
+                <span style="color: #aaa;">A / D</span> : Bank Left / Right<br>
+                <span style="color: #aaa;">Q / E</span> : Yaw (Rudder)<br>
+                <span style="color: #aaa;">Shift / Ctrl</span> : Throttle<br>
+                <span style="color: #aaa;">C</span> : Camera View<br>
+                <span style="color: #aaa;">1 / 2</span> : Select Plane (Cessna / Jet)<br>
+                <span style="color: #aaa;">R</span> : Toggle Rain<br>
+            </div>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <!-- Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/simplex-noise/2.4.0/simplex-noise.min.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const WORLD_SIZE = 20000;
+        const FOG_COLOR = 0x87CEEB; // Sky blue
+        const RENDER_DISTANCE = 4000;
+
+        // --- GLOBALS ---
+        let scene, camera, renderer;
+        let clock, delta;
+        let terrainMesh, waterMesh;
+        let airplane;
+        let rainSystem;
+        let simplex = new SimplexNoise();
+
+        let inputs = {
+            pitchUp: false, pitchDown: false,
+            rollLeft: false, rollRight: false,
+            yawLeft: false, yawRight: false,
+            throttleUp: false, throttleDown: false
+        };
+
+        let flightStats = { speed: 0, altitude: 0 };
+        let cameraMode = 0; // 0: Chase, 1: Cockpit, 2: Top
+        let currentPlaneType = 'cessna'; // 'cessna' or 'jet'
+        let isRaining = false;
+
+        // --- INIT ---
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(FOG_COLOR);
+            scene.fog = new THREE.FogExp2(FOG_COLOR, 0.00025);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 50000);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Lighting
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            dirLight.position.set(1000, 2000, 1000);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 1000;
+            dirLight.shadow.camera.bottom = -1000;
+            dirLight.shadow.camera.left = -1000;
+            dirLight.shadow.camera.right = 1000;
+            dirLight.shadow.camera.near = 0.1;
+            dirLight.shadow.camera.far = 5000;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            // Create World
+            createTerrain();
+            createWater();
+            createClouds();
+            createRain();
+
+            // Create Player
+            createAirplane('cessna');
+
+            // Events
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('keydown', (e) => onKey(e, true), false);
+            document.addEventListener('keyup', (e) => onKey(e, false), false);
+
+            // Loop
+            clock = new THREE.Clock();
+
+            // Fake loading time for "generating"
+            setTimeout(() => {
+                document.getElementById('loading').style.opacity = 0;
+                setTimeout(() => document.getElementById('loading').style.display = 'none', 1000);
+                animate();
+            }, 500);
+        }
+
+        // --- TERRAIN GENERATION ---
+        function createTerrain() {
+            // Higher resolution for better vertex coloring
+            const geometry = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, 256, 256);
+            geometry.rotateX(-Math.PI / 2);
+
+            const count = geometry.attributes.position.count;
+            const vertices = geometry.attributes.position;
+
+            // Color attribute
+            geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+            const colors = geometry.attributes.color;
+
+            const colorSand = new THREE.Color(0xeecfa1);
+            const colorGrass = new THREE.Color(0x3b7d3b);
+            const colorRock = new THREE.Color(0x5a5a5a);
+            const colorSnow = new THREE.Color(0xffffff);
+
+            for (let i = 0; i < count; i++) {
+                const x = vertices.getX(i);
+                const z = vertices.getZ(i);
+
+                // Layered noise
+                let y = 0;
+                y += simplex.noise2D(x * 0.0002, z * 0.0002) * 800;
+                y += simplex.noise2D(x * 0.001, z * 0.001) * 100;
+                y += simplex.noise2D(x * 0.005, z * 0.005) * 20;
+
+                // Flatten valleys
+                if (y < 50) y = y * 0.4;
+
+                vertices.setY(i, y);
+
+                // Coloring based on height
+                let color = new THREE.Color();
+                if (y < 15) {
+                    color.copy(colorSand); // Beach
+                } else if (y < 300) {
+                    color.copy(colorGrass); // Grass
+                    // Variation
+                    color.offsetHSL(0, 0, (Math.random()-0.5)*0.1);
+                } else if (y < 600) {
+                    color.copy(colorRock); // Mountain
+                    // Blend grass into rock
+                    if (y < 350) color.lerp(colorGrass, 0.5);
+                } else {
+                    color.copy(colorSnow); // Snow caps
+                }
+
+                colors.setXYZ(i, color.r, color.g, color.b);
+            }
+
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshStandardMaterial({
+                vertexColors: true,
+                roughness: 0.8,
+                flatShading: true // Low poly look
+            });
+
+            terrainMesh = new THREE.Mesh(geometry, material);
+            terrainMesh.receiveShadow = true;
+            scene.add(terrainMesh);
+        }
+
+        function createWater() {
+            const geometry = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE);
+            geometry.rotateX(-Math.PI / 2);
+            const material = new THREE.MeshStandardMaterial({
+                color: 0x0077be,
+                transparent: true,
+                opacity: 0.8,
+                roughness: 0.1,
+                metalness: 0.1
+            });
+            waterMesh = new THREE.Mesh(geometry, material);
+            waterMesh.position.y = 5; // Water level
+            scene.add(waterMesh);
+        }
+
+        function createClouds() {
+            const cloudGeo = new THREE.BoxGeometry(1, 1, 1);
+            const cloudMat = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            // InstancedMesh for performance? Or simple merge. Let's use Groups for simplicity in logic.
+            // Actually, separate meshes for culling is fine for < 500 objects.
+
+            for (let i = 0; i < 80; i++) {
+                const cluster = new THREE.Group();
+                const x = (Math.random() - 0.5) * WORLD_SIZE * 0.8;
+                const z = (Math.random() - 0.5) * WORLD_SIZE * 0.8;
+                const y = 800 + Math.random() * 600;
+
+                const chunks = 5 + Math.random() * 10;
+                for(let j=0; j<chunks; j++) {
+                    const mesh = new THREE.Mesh(cloudGeo, cloudMat);
+                    mesh.position.set(
+                        (Math.random() - 0.5) * 150,
+                        (Math.random() - 0.5) * 60,
+                        (Math.random() - 0.5) * 150
+                    );
+                    const s = 40 + Math.random() * 60;
+                    mesh.scale.set(s, s*0.6, s);
+                    mesh.castShadow = true;
+                    cluster.add(mesh);
+                }
+                cluster.position.set(x, y, z);
+                scene.add(cluster);
+            }
+        }
+
+        function createRain() {
+            const count = 15000;
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            for(let i=0; i<count; i++) {
+                positions.push(
+                    (Math.random() - 0.5) * 1000,
+                    (Math.random() - 0.5) * 1000,
+                    (Math.random() - 0.5) * 1000
+                );
+            }
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            const material = new THREE.PointsMaterial({
+                color: 0xaaaaaa,
+                size: 0.5,
+                transparent: true
+            });
+            rainSystem = new THREE.Points(geometry, material);
+            rainSystem.visible = false;
+            scene.add(rainSystem);
+        }
+
+        // --- AIRCRAFT MANAGEMENT ---
+        function createAirplane(type) {
+            if (airplane) scene.remove(airplane);
+
+            currentPlaneType = type;
+            document.getElementById('plane-display').innerText = type === 'cessna' ? "CESSNA" : "F-18 JET";
+
+            airplane = new THREE.Group();
+
+            if (type === 'cessna') {
+                // CESSNA MODEL
+                const matFuselage = new THREE.MeshStandardMaterial({ color: 0xffffff });
+                const matWings = new THREE.MeshStandardMaterial({ color: 0xff4444 });
+                const matDark = new THREE.MeshStandardMaterial({ color: 0x333333 });
+
+                // Body
+                const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.5, 8), matFuselage);
+                body.castShadow = true;
+                airplane.add(body);
+
+                // Wings
+                const wings = new THREE.Mesh(new THREE.BoxGeometry(12, 0.2, 2.5), matWings);
+                wings.position.set(0, 0.8, 1);
+                wings.castShadow = true;
+                airplane.add(wings);
+
+                // Tail
+                const tailV = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.5, 2), matWings);
+                tailV.position.set(0, 1.5, -3.5);
+                airplane.add(tailV);
+
+                const tailH = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 1.5), matWings);
+                tailH.position.set(0, 0.5, -3.5);
+                airplane.add(tailH);
+
+                // Prop
+                const prop = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 0.2), matDark);
+                prop.position.set(0, 0, 4.1);
+                airplane.propeller = prop;
+                airplane.add(prop);
+
+                // Gear
+                const gearL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1, 0.2), matDark);
+                gearL.position.set(1.5, -1, 1);
+                airplane.add(gearL);
+                const gearR = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1, 0.2), matDark);
+                gearR.position.set(-1.5, -1, 1);
+                airplane.add(gearR);
+
+                // Specs
+                airplane.maxSpeed = 60;
+                airplane.minSpeed = 15; // Stall
+                airplane.accel = 20;
+                airplane.turnSpeed = 1.0;
+                airplane.hasProp = true;
+
+            } else {
+                // JET MODEL
+                const matBody = new THREE.MeshStandardMaterial({ color: 0x8899aa, roughness: 0.4, metalness: 0.6 });
+                const matDark = new THREE.MeshStandardMaterial({ color: 0x222222 });
+
+                // Fuselage
+                const body = new THREE.Mesh(new THREE.ConeGeometry(1.5, 14, 32), matBody);
+                body.rotation.x = Math.PI / 2;
+                body.castShadow = true;
+                airplane.add(body);
+
+                // Wings (Swept)
+                const wingShape = new THREE.Shape();
+                wingShape.moveTo(0,0);
+                wingShape.lineTo(5, -3);
+                wingShape.lineTo(5, -6);
+                wingShape.lineTo(0, -4);
+                const wingGeo = new THREE.ExtrudeGeometry(wingShape, { depth: 0.2, bevelEnabled: false });
+                const wingsL = new THREE.Mesh(wingGeo, matBody);
+                wingsL.rotation.x = Math.PI / 2;
+                wingsL.position.set(0,0,2);
+                airplane.add(wingsL);
+
+                const wingsR = wingsL.clone();
+                wingsR.scale.x = -1; // Mirror
+                airplane.add(wingsR);
+
+                // Tail
+                const tailV = new THREE.Mesh(new THREE.BoxGeometry(0.2, 3, 3), matBody);
+                tailV.position.set(0, 1.5, -6);
+                // Angled tails
+                tailV.rotation.x = Math.PI / 8; // Sweep back
+                airplane.add(tailV);
+
+                const tailH = new THREE.Mesh(new THREE.BoxGeometry(6, 0.1, 2), matBody);
+                tailH.position.set(0, 0, -6);
+                airplane.add(tailH);
+
+                // Cockpit
+                const canopy = new THREE.Mesh(new THREE.CapsuleGeometry(0.8, 3, 4, 8), matDark);
+                canopy.rotation.x = Math.PI / 2;
+                canopy.position.set(0, 1, 1);
+                airplane.add(canopy);
+
+                // Engine Glow
+                const glow = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.6, 1, 16), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+                glow.rotation.x = Math.PI / 2;
+                glow.position.set(0, 0, -7.5);
+                airplane.add(glow);
+
+                // Specs
+                airplane.maxSpeed = 180;
+                airplane.minSpeed = 50;
+                airplane.accel = 60;
+                airplane.turnSpeed = 1.5;
+                airplane.hasProp = false;
+            }
+
+            // Physics State
+            airplane.velocity = new THREE.Vector3(0, 0, 0);
+            airplane.speed = 0;
+            airplane.throttle = 0;
+            airplane.rotationVelocity = new THREE.Vector3(0, 0, 0);
+
+            airplane.position.set(0, 400, 0);
+            scene.add(airplane);
+        }
+
+        // --- INPUT HANDLING ---
+        function onKey(event, isDown) {
+            const k = event.code;
+            if (k === 'KeyW') inputs.pitchDown = isDown;
+            if (k === 'KeyS') inputs.pitchUp = isDown;
+            if (k === 'KeyA') inputs.rollLeft = isDown;
+            if (k === 'KeyD') inputs.rollRight = isDown;
+            if (k === 'KeyQ') inputs.yawLeft = isDown;
+            if (k === 'KeyE') inputs.yawRight = isDown;
+            if (k === 'ShiftLeft') inputs.throttleUp = isDown;
+            if (k === 'ControlLeft') inputs.throttleDown = isDown;
+
+            if (isDown) {
+                if (k === 'KeyC') cameraMode = (cameraMode + 1) % 3;
+                if (k === 'Digit1') createAirplane('cessna');
+                if (k === 'Digit2') createAirplane('jet');
+                if (k === 'KeyR') {
+                    isRaining = !isRaining;
+                    rainSystem.visible = isRaining;
+                    scene.fog.density = isRaining ? 0.0015 : 0.00025; // Thicker fog in rain
+                    scene.fog.color.setHex(isRaining ? 0x556677 : FOG_COLOR);
+                    scene.background.setHex(isRaining ? 0x556677 : FOG_COLOR);
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- PHYSICS & LOGIC ---
+        function updatePhysics(dt) {
+            if (!airplane) return;
+
+            // Throttle Logic
+            if (inputs.throttleUp) airplane.throttle += 0.5 * dt;
+            if (inputs.throttleDown) airplane.throttle -= 0.5 * dt;
+            airplane.throttle = Math.max(0, Math.min(1, airplane.throttle));
+
+            // Forces
+            const maxThrust = airplane.accel * 3;
+            const thrust = airplane.throttle * maxThrust;
+            const drag = airplane.speed * airplane.speed * 0.005; // Drag coeff
+
+            const netForce = thrust - drag;
+            const acceleration = netForce; // mass = 1
+
+            airplane.speed += acceleration * dt;
+            if (airplane.speed < 0) airplane.speed = 0;
+
+            // Control Authority
+            const speedFactor = Math.min(1, airplane.speed / airplane.maxSpeed);
+            const maneuverability = airplane.turnSpeed * speedFactor;
+
+            // Inputs
+            const targetRotVel = new THREE.Vector3(0,0,0);
+            if (inputs.pitchUp) targetRotVel.x = maneuverability;
+            if (inputs.pitchDown) targetRotVel.x = -maneuverability;
+            if (inputs.rollLeft) targetRotVel.z = maneuverability * 1.5;
+            if (inputs.rollRight) targetRotVel.z = -maneuverability * 1.5;
+            if (inputs.yawLeft) targetRotVel.y = maneuverability * 0.5;
+            if (inputs.yawRight) targetRotVel.y = -maneuverability * 0.5;
+
+            // Banking Turn Logic: Rolling induces Yaw
+            // If banked right (z < 0), we should yaw right (y < 0).
+            // Calculate bank angle
+            const bankAngle = airplane.rotation.z;
+            // This is a simplification. Ideally use local up vector dot world up.
+            // Add "Bank Lift" to yaw
+            // Only turns if we have speed (Lift)
+            if (airplane.speed > 10) {
+                targetRotVel.y -= bankAngle * 0.5 * speedFactor;
+            }
+
+            // Apply Rotation Smoothing
+            airplane.rotationVelocity.lerp(targetRotVel, 2.0 * dt);
+
+            airplane.rotateX(airplane.rotationVelocity.x * dt);
+            airplane.rotateY(airplane.rotationVelocity.y * dt);
+            airplane.rotateZ(airplane.rotationVelocity.z * dt);
+
+            // Self-Leveling (Stability) - Plane tries to return to level roll if no input
+            if (!inputs.rollLeft && !inputs.rollRight) {
+                airplane.rotation.z *= (1.0 - 1.0 * dt);
+            }
+
+            // Aerodynamics
+            const gravity = 9.8;
+            // Lift = Speed^2 * Cl.
+            // At cruise speed, Lift should equal Gravity.
+            // Cruise ~ maxSpeed * 0.8?
+            const cruiseSpeed = airplane.maxSpeed * 0.7;
+            const liftCoeff = gravity / (cruiseSpeed * cruiseSpeed);
+            const liftForce = airplane.speed * airplane.speed * liftCoeff;
+
+            // Vectors
+            const forwardDir = new THREE.Vector3(0, 0, 1).applyQuaternion(airplane.quaternion);
+            const upDir = new THREE.Vector3(0, 1, 0).applyQuaternion(airplane.quaternion); // Local Up
+
+            // Move Vector (Forward)
+            const moveVec = forwardDir.clone().multiplyScalar(airplane.speed * dt);
+
+            // Lift Vector (Local Up)
+            const liftVec = upDir.clone().multiplyScalar(liftForce * dt);
+
+            // Gravity Vector (World Down)
+            const gravityVec = new THREE.Vector3(0, -gravity * dt, 0);
+
+            airplane.position.add(moveVec);
+            airplane.position.add(liftVec);
+            airplane.position.add(gravityVec);
+
+            // Floor Collision
+            if (airplane.position.y < 5) {
+                airplane.position.y = 5;
+                airplane.speed *= 0.95; // Friction
+                // Reset rotation to flat if on ground?
+                airplane.rotation.x *= 0.9;
+                airplane.rotation.z *= 0.9;
+            }
+
+            // Propeller Animation
+            if (airplane.hasProp) {
+                airplane.propeller.rotation.z += airplane.throttle * 20 * dt + 2 * dt;
+            }
+
+            // UI
+            flightStats.speed = Math.floor(airplane.speed * 2); // Fake Knots conversion
+            flightStats.altitude = Math.floor(airplane.position.y * 3); // Fake Feet
+            document.getElementById('speed-display').innerText = flightStats.speed + " kn";
+            document.getElementById('alt-display').innerText = flightStats.altitude + " ft";
+
+            // Rain System follow
+            if (isRaining && rainSystem) {
+                rainSystem.position.copy(airplane.position);
+                // Animate rain drops
+                const positions = rainSystem.geometry.attributes.position.array;
+                for(let i=1; i<positions.length; i+=3) {
+                    positions[i] -= 10; // Fall down
+                    if (positions[i] < -500) positions[i] = 500;
+                }
+                rainSystem.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+
+        function updateCamera() {
+            if (!airplane) return;
+
+            if (cameraMode === 0) { // Chase
+                const offset = new THREE.Vector3(0, 10, -30);
+                if (currentPlaneType === 'jet') offset.set(0, 15, -50); // Further for jet
+
+                offset.applyQuaternion(airplane.quaternion);
+                // Add some lag/smoothness
+                const targetPos = airplane.position.clone().add(offset);
+                camera.position.lerp(targetPos, 0.1);
+
+                // Look slightly ahead of the plane
+                const lookAtOffset = new THREE.Vector3(0, 0, 50).applyQuaternion(airplane.quaternion);
+                camera.lookAt(airplane.position.clone().add(lookAtOffset));
+            } else if (cameraMode === 1) { // Cockpit
+                const offset = new THREE.Vector3(0, 1.2, 2);
+                offset.applyQuaternion(airplane.quaternion);
+                camera.position.copy(airplane.position.clone().add(offset));
+                camera.quaternion.copy(airplane.quaternion);
+            } else if (cameraMode === 2) { // Top
+                camera.position.set(airplane.position.x, airplane.position.y + 400, airplane.position.z);
+                camera.lookAt(airplane.position);
+                camera.rotation.z = -Math.PI / 2; // Orient North
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            delta = clock.getDelta();
+            updatePhysics(delta);
+            updateCamera();
+            renderer.render(scene, camera);
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>
